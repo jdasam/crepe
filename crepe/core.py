@@ -189,6 +189,47 @@ def predict_single_frame(model, audio, sr):
 
     return frequency[0], confidence[0]
 
+def predict_offline(model, audio, sr, center=True, step_size=10, viterbi=False):
+    if len(audio.shape) == 2:
+        audio = audio.mean(1)  # make mono
+    audio = audio.astype(np.float32)
+    if sr != model_srate:
+        # resample audio if necessary
+        from resampy import resample
+        audio = resample(audio, sr, model_srate)
+
+    # pad so that frames are centered around their timestamps (i.e. first frame
+    # is zero centered).
+    if center:
+        audio = np.pad(audio, 512, mode='constant', constant_values=0)
+
+    # make 1024-sample frames of the audio with hop length of 10 milliseconds
+    hop_length = int(model_srate * step_size / 1000)
+    n_frames = 1 + int((len(audio) - 1024) / hop_length)
+    frames = as_strided(audio, shape=(1024, n_frames),
+                        strides=(audio.itemsize, hop_length * audio.itemsize))
+    frames = frames.transpose().copy()
+
+    # normalize each frame -- this is expected by the model
+    frames -= np.mean(frames, axis=1)[:, np.newaxis]
+    frames /= np.std(frames, axis=1)[:, np.newaxis]
+
+    # run prediction and convert the frequency bin weights to Hz
+    activation =  model.predict(frames, verbose=0)
+    confidence = activation.max(axis=1)
+
+    if viterbi:
+        cents = to_viterbi_cents(activation)
+    else:
+        cents = to_local_average_cents(activation)
+
+    frequency = 10 * 2 ** (cents / 1200)
+    frequency[np.isnan(frequency)] = 0
+
+    time = np.arange(confidence.shape[0]) * step_size / 1000.0
+
+    return frequency, confidence
+
 
 
 def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
